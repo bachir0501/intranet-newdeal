@@ -1,0 +1,80 @@
+name: CD Pipeline — Branche prod
+
+on:
+  push:
+    branches: [ prod ]
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/intranet-newdeal
+  CONTAINER_NAME: intranet-newdeal-prod
+
+jobs:
+  security-scan:
+    name: Scan Securite Pre-Deploiement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      - name: Connexion a Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull de l image depuis Docker Hub
+        run: docker pull ${{ env.IMAGE_NAME }}:latest
+
+      - name: Installation de Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+            | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -q
+          sudo apt-get install -y trivy
+
+      - name: Scan des vulnerabilites CRITICAL
+        run: |
+          trivy image \
+            --severity CRITICAL \
+            --format table \
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Scan des secrets avec Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    name: Deploiement Production (runner_prod)
+    runs-on: runner_prod
+    needs: security-scan
+    steps:
+      - name: Connexion a Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull de l image
+        run: docker pull ${{ env.IMAGE_NAME }}:latest
+
+      - name: Arret du conteneur existant
+        run: |
+          docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+
+      - name: Demarrage du nouveau conteneur
+        run: |
+          docker run -d \
+            --name ${{ env.CONTAINER_NAME }} \
+            --restart unless-stopped \
+            -p 80:80 \
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Verification de sante
+        run: |
+          sleep 5
+          curl -f http://localhost:80 && echo "Site operationnel sur le port 80"
